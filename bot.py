@@ -185,8 +185,17 @@ async def enter_comment(msg: Message, state: FSMContext):
     await msg.answer(
         "✅ Заявка отправлена! Оператор свяжется с вами в ближайшее время.",
         reply_markup=main_kb
+        
     )
-
+@dp.message(Command("myid"))
+async def show_my_id(msg: Message):
+    await msg.answer(
+        f"Ваш ID: <code>{msg.from_user.id}</code>\n"
+        f"ADMIN_ID в config: <code>{ADMIN_ID}</code>\n"
+        f"Совпадает: <b>{msg.from_user.id == ADMIN_ID}</b>",
+        parse_mode="HTML"
+    )
+    
 async def main():
     print("Бот запущен...")
     await dp.start_polling(bot)
