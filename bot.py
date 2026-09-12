@@ -11,10 +11,12 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.filters import Command
 
 from config import BOT_TOKEN, ADMIN_ID
+import database as db
 
 bot = Bot(BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 
+# ---------- УСЛУГИ ----------
 SERVICES = {
     "Снежная":            (3199, 2699, 1599),
     "Нод Край":           (4999, 4199, 2899),
@@ -41,25 +43,35 @@ EXTRA_SERVICES = {
     "100k гемов":  "80 000",
 }
 
+# ---------- FSM ----------
 class Order(StatesGroup):
-    choosing_type = State()      
     choosing_region = State()
     choosing_percent = State()
     entering_contact = State()
     entering_comment = State()
 
+# ---------- КЛАВИАТУРЫ ----------
 main_kb = ReplyKeyboardMarkup(
     keyboard=[
         [KeyboardButton(text="🌍 Регион")],
         [KeyboardButton(text="💎 Доп. услуги")],
+        [KeyboardButton(text="📋 Мои заказы")],
         [KeyboardButton(text="ℹ️ Помощь")],
     ],
     resize_keyboard=True
 )
 
+admin_kb = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="📥 Новые заявки")],
+        [KeyboardButton(text="📊 Статистика")],
+        [KeyboardButton(text="⬅️ Выход")],
+    ],
+    resize_keyboard=True
+)
+
 def regions_kb():
-    rows = []
-    row = []
+    rows, row = [], []
     for name in SERVICES.keys():
         row.append(InlineKeyboardButton(text=name, callback_data=f"reg:{name}"))
         if len(row) == 2:
@@ -67,7 +79,7 @@ def regions_kb():
     if row: rows.append(row)
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
-def percent_kb(region: str):
+def percent_kb(region):
     p = SERVICES[region]
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=f"0–100%  — {p[0]}₽",  callback_data=f"pct:{region}:0")],
@@ -81,7 +93,14 @@ def extra_kb():
             for k, v in EXTRA_SERVICES.items()]
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
-@dp.message(F.text == "/start")
+def order_actions_kb(order_id):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Выполнено", callback_data=f"adm_done:{order_id}")],
+        [InlineKeyboardButton(text="❌ Отклонить", callback_data=f"adm_reject:{order_id}")],
+    ])
+
+# ---------- СТАРТ ----------
+@dp.message(Command("start"))
 async def start(msg: Message):
     await msg.answer(
         "👋 Добро пожаловать!\n"
@@ -95,11 +114,29 @@ async def help_msg(msg: Message):
     await msg.answer(
         "Как оформить заказ:\n"
         "1. Нажмите «🌍 Регион» или «💎 Доп. услуги»\n"
-        "2. Выберите нужный пункт\n"
-        "3. Укажите контакт для связи\n"
-        "4. Дождитесь подтверждения от оператора"
+        "2. Выберите услугу и процент\n"
+        "3. Укажите контакт и комментарий\n"
+        "4. Оператор свяжется с вами\n\n"
+        "📋 «Мои заказы» — история и статусы."
     )
 
+# ---------- МОИ ЗАКАЗЫ ----------
+@dp.message(F.text == "📋 Мои заказы")
+async def my_orders(msg: Message):
+    orders = await db.get_user_orders(msg.from_user.id)
+    if not orders:
+        await msg.answer("У вас пока нет заказов.")
+        return
+    text = "📋 <b>Ваши последние заказы:</b>\n\n"
+    for o in orders:
+        status_emoji = {"new": "🕐", "done": "✅", "rejected": "❌"}.get(o["status"], "•")
+        text += (
+            f"{status_emoji} <b>#{o['id']}</b> — {o['service']}\n"
+            f"💰 {o['price']}₽ | 📅 {o['created_at']}\n\n"
+        )
+    await msg.answer(text, parse_mode="HTML")
+
+# ---------- ОФОРМЛЕНИЕ ----------
 @dp.message(F.text == "🌍 Регион")
 async def choose_region(msg: Message, state: FSMContext):
     await state.set_state(Order.choosing_region)
@@ -107,7 +144,6 @@ async def choose_region(msg: Message, state: FSMContext):
 
 @dp.message(F.text == "💎 Доп. услуги")
 async def choose_extra(msg: Message, state: FSMContext):
-    await state.set_state(Order.choosing_type)
     await msg.answer("Дополнительные услуги:", reply_markup=extra_kb())
 
 @dp.callback_query(F.data.startswith("reg:"))
@@ -139,7 +175,7 @@ async def percent_selected(cb: CallbackQuery, state: FSMContext):
     await cb.message.edit_text(
         f"✅ Услуга: <b>{region} — {percent_label}</b>\n"
         f"💰 Цена: <b>{price}₽</b>\n\n"
-        f"Напишите ваш контакт для связи (Telegram @username или телефон):",
+        f"Напишите ваш контакт (Telegram @username или телефон):",
         parse_mode="HTML"
     )
     await cb.answer()
@@ -169,35 +205,145 @@ async def enter_comment(msg: Message, state: FSMContext):
     data = await state.get_data()
     await state.clear()
 
+    order_id = await db.add_order(
+        user_id=msg.from_user.id,
+        username=msg.from_user.username,
+        full_name=msg.from_user.full_name,
+        service=data["service"],
+        price=str(data["price"]),
+        contact=data["contact"],
+        comment=msg.text
+    )
+
     text_admin = (
-        "🔔 <b>НОВЫЙ ЗАКАЗ</b>\n\n"
-        f"👤 Клиент: {msg.from_user.full_name} (@{msg.from_user.username or 'нет'})\n"
-        f"🆔 ID: <code>{msg.from_user.id}</code>\n"
-        f"📦 Услуга: <b>{data['service']}</b>\n"
-        f"💰 Цена: <b>{data['price']}₽</b>\n"
-        f"📞 Контакт: {data['contact']}\n"
-        f"💬 Комментарий: {msg.text}"
+        f"🔔 <b>НОВЫЙ ЗАКАЗ #{order_id}</b>\n\n"
+        f"👤 {msg.from_user.full_name} (@{msg.from_user.username or 'нет'})\n"
+        f"🆔 <code>{msg.from_user.id}</code>\n"
+        f"📦 {data['service']}\n"
+        f"💰 {data['price']}₽\n"
+        f"📞 {data['contact']}\n"
+        f"💬 {msg.text}"
     )
     try:
-        await bot.send_message(ADMIN_ID, text_admin, parse_mode="HTML")
+        await bot.send_message(ADMIN_ID, text_admin,
+                               parse_mode="HTML",
+                               reply_markup=order_actions_kb(order_id))
     except Exception as e:
         print("Не удалось отправить админу:", e)
 
     await msg.answer(
-        "✅ Заявка отправлена! Оператор свяжется с вами в ближайшее время.",
+        f"✅ Заявка <b>#{order_id}</b> отправлена! Оператор свяжется с вами.",
+        parse_mode="HTML",
         reply_markup=main_kb
-        
     )
+
+# ---------- АДМИН-ПАНЕЛЬ ----------
+def is_admin(user_id):
+    return user_id == ADMIN_ID
+
+@dp.message(Command("admin"))
+async def admin_panel(msg: Message):
+    if not is_admin(msg.from_user.id):
+        return
+    await msg.answer("🔧 Админ-панель:", reply_markup=admin_kb)
+
 @dp.message(Command("myid"))
 async def show_my_id(msg: Message):
     await msg.answer(
         f"Ваш ID: <code>{msg.from_user.id}</code>\n"
-        f"ADMIN_ID в config: <code>{ADMIN_ID}</code>\n"
+        f"ADMIN_ID из config: <code>{ADMIN_ID}</code>\n"
         f"Совпадает: <b>{msg.from_user.id == ADMIN_ID}</b>",
         parse_mode="HTML"
     )
-    
+
+@dp.message(F.text == "⬅️ Выход")
+async def admin_exit(msg: Message):
+    if not is_admin(msg.from_user.id):
+        return
+    await msg.answer("Вы вышли из админки.", reply_markup=main_kb)
+
+@dp.message(F.text == "📊 Статистика")
+async def admin_stats(msg: Message):
+    if not is_admin(msg.from_user.id):
+        return
+    s = await db.get_stats()
+    await msg.answer(
+        f"📊 <b>Статистика</b>\n\n"
+        f"Всего заказов: <b>{s['total']}</b>\n"
+        f"🕐 Новых: <b>{s['new']}</b>\n"
+        f"✅ Выполнено: <b>{s['done']}</b>",
+        parse_mode="HTML"
+    )
+
+@dp.message(F.text == "📥 Новые заявки")
+async def admin_new_orders(msg: Message):
+    if not is_admin(msg.from_user.id):
+        return
+    orders = await db.get_new_orders()
+    if not orders:
+        await msg.answer("Новых заявок нет.")
+        return
+    for o in orders:
+        text = (
+            f"🔔 <b>Заказ #{o['id']}</b>\n\n"
+            f"👤 {o['full_name']} (@{o['username'] or 'нет'})\n"
+            f"🆔 <code>{o['user_id']}</code>\n"
+            f"📦 {o['service']}\n"
+            f"💰 {o['price']}₽\n"
+            f"📞 {o['contact']}\n"
+            f"💬 {o['comment']}\n"
+            f"📅 {o['created_at']}"
+        )
+        await msg.answer(text, parse_mode="HTML",
+                         reply_markup=order_actions_kb(o["id"]))
+
+@dp.callback_query(F.data.startswith("adm_done:"))
+async def adm_done(cb: CallbackQuery):
+    if not is_admin(cb.from_user.id):
+        await cb.answer("Нет доступа", show_alert=True)
+        return
+    order_id = int(cb.data.split(":")[1])
+    order = await db.get_order(order_id)
+    await db.set_status(order_id, "done")
+    await cb.message.edit_reply_markup(reply_markup=None)
+    await cb.message.answer(f"✅ Заказ #{order_id} выполнен.")
+    if order:
+        try:
+            await bot.send_message(
+                order["user_id"],
+                f"✅ Ваш заказ <b>#{order_id}</b> ({order['service']}) выполнен!\n"
+                f"Спасибо за обращение 💙",
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            print("Не удалось уведомить клиента:", e)
+    await cb.answer()
+
+@dp.callback_query(F.data.startswith("adm_reject:"))
+async def adm_reject(cb: CallbackQuery):
+    if not is_admin(cb.from_user.id):
+        await cb.answer("Нет доступа", show_alert=True)
+        return
+    order_id = int(cb.data.split(":")[1])
+    order = await db.get_order(order_id)
+    await db.set_status(order_id, "rejected")
+    await cb.message.edit_reply_markup(reply_markup=None)
+    await cb.message.answer(f"❌ Заказ #{order_id} отклонён.")
+    if order:
+        try:
+            await bot.send_message(
+                order["user_id"],
+                f"❌ К сожалению, заказ <b>#{order_id}</b> отклонён.\n"
+                f"Свяжитесь с оператором для деталей.",
+                parse_mode="HTML"
+            )
+        except Exception as e:
+            print("Не удалось уведомить клиента:", e)
+    await cb.answer()
+
+# ---------- ЗАПУСК ----------
 async def main():
+    await db.init_db()
     print("Бот запущен...")
     await dp.start_polling(bot)
 
